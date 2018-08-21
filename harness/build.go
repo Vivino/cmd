@@ -87,13 +87,6 @@ func Build(buildFlags ...string) (app *App, compileError *revel.Error) {
 		versionLinkerFlags := fmt.Sprintf("-X %s/app.AppVersion=%s -X %s/app.BuildTime=%s",
 			revel.ImportPath, appVersion, revel.ImportPath, buildTime)
 
-		// TODO remove version check for versionLinkerFlags after Revel becomes Go min version to go1.5
-		goVersion, err := strconv.ParseFloat(runtime.Version()[2:5], 64)
-		// runtime.Version() may return commit hash, we assume it is above 1.5
-		if goVersion < 1.5 && err == nil {
-			versionLinkerFlags = fmt.Sprintf("-X %s/app.AppVersion \"%s\" -X %s/app.BuildTime \"%s\"",
-				revel.ImportPath, appVersion, revel.ImportPath, buildTime)
-		}
 		flags := []string{
 			"build",
 			"-i",
@@ -287,7 +280,7 @@ func calcImportAliases(src *SourceInfo) map[string]string {
 }
 
 func addAlias(aliases map[string]string, importPath, pkgName string) {
-    alias, ok := aliases[importPath]
+	alias, ok := aliases[importPath]
 	if ok {
 		return
 	}
@@ -298,7 +291,7 @@ func addAlias(aliases map[string]string, importPath, pkgName string) {
 func makePackageAlias(aliases map[string]string, pkgName string) string {
 	i := 0
 	alias := pkgName
-	for containsValue(aliases, alias) || alias=="revel" {
+	for containsValue(aliases, alias) || alias == "revel" {
 		alias = fmt.Sprintf("%s%d", pkgName, i)
 		i++
 	}
