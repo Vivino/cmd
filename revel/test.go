@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/revel/cmd/harness"
@@ -226,8 +227,11 @@ func getTestsList(baseURL string) (*[]controllers.TestSuiteDesc, error) {
 				break
 			}
 		}
-		if i < 3 {
-			time.Sleep(3 * time.Second)
+		if resp.Body != nil {
+			resp.Body.Close()
+		}
+		if i < 20 {
+			time.Sleep(time.Millisecond * 500)
 			continue
 		}
 		if err != nil {
@@ -261,54 +265,61 @@ func runTestSuites(baseURL, resultPath string, testSuites *[]controllers.TestSui
 		overallSuccess = true
 		failedResults  []controllers.TestSuiteResult
 	)
-	for _, suite := range *testSuites {
-		// Print the name of the suite we're running.
-		name := suite.Name
-		if len(name) > 22 {
-			name = name[:19] + "..."
-		}
-		fmt.Printf("%-22s", name)
+	var wg sync.WaitGroup
+	// TODO make this configurable and default to 1
+	parallelism := make(chan struct{}, 50)
+	for _, s := range *testSuites {
+		wg.Add(1)
+		parallelism <- struct{}{}
+		go func(suite controllers.TestSuiteDesc) {
+			defer wg.Done()
+			defer func() { <-parallelism }()
+			// Print the name of the suite we're running.
+			name := suite.Name
+			if len(name) > 22 {
+				name = name[:19] + "..."
+			}
+			fmt.Printf("%-22s", name)
 
-		// Run every test.
-		startTime := time.Now()
-		suiteResult := controllers.TestSuiteResult{Name: suite.Name, Passed: true}
-		for _, test := range suite.Tests {
-			testURL := baseURL + "/@tests/" + suite.Name + "/" + test.Name
-			resp, err := http.Get(testURL)
+			// Run every test.
+			startTime := time.Now()
+			suiteResult := controllers.TestSuiteResult{Name: suite.Name, Passed: true}
+			for _, test := range suite.Tests {
+				testURL := baseURL + "/@tests/" + suite.Name + "/" + test.Name
+				resp, err := http.Get(testURL)
+				if err != nil {
+					errorf("Failed to fetch test result at url %s: %s", testURL, err)
+				}
+
+				var testResult controllers.TestResult
+				err = json.NewDecoder(resp.Body).Decode(&testResult)
+				resp.Body.Close()
+				if err == nil && !testResult.Passed {
+					suiteResult.Passed = false
+				}
+				suiteResult.Results = append(suiteResult.Results, testResult)
+			}
+			overallSuccess = overallSuccess && suiteResult.Passed
+
+			// Print result.  (Just PASSED or FAILED, and the time taken)
+			suiteResultStr, suiteAlert := "PASSED", ""
+			if !suiteResult.Passed {
+				suiteResultStr, suiteAlert = "FAILED", "!"
+				failedResults = append(failedResults, suiteResult)
+			}
+			fmt.Printf("%8s%3s%6ds\n", suiteResultStr, suiteAlert, int(time.Since(startTime).Seconds()))
+			// Create the result HTML file.
+			suiteResultFilename := filepath.Join(resultPath,
+				fmt.Sprintf("%s.%s.html", suite.Name, strings.ToLower(suiteResultStr)))
+			suiteResultFile, err := os.Create(suiteResultFilename)
 			if err != nil {
-				errorf("Failed to fetch test result at url %s: %s", testURL, err)
+				errorf("Failed to create result file %s: %s", suiteResultFilename, err)
 			}
-			defer func() {
-				_ = resp.Body.Close()
-			}()
-
-			var testResult controllers.TestResult
-			err = json.NewDecoder(resp.Body).Decode(&testResult)
-			if err == nil && !testResult.Passed {
-				suiteResult.Passed = false
+			if err = resultTemplate.Render(suiteResultFile, suiteResult); err != nil {
+				errorf("Failed to render result template: %s", err)
 			}
-			suiteResult.Results = append(suiteResult.Results, testResult)
-		}
-		overallSuccess = overallSuccess && suiteResult.Passed
-
-		// Print result.  (Just PASSED or FAILED, and the time taken)
-		suiteResultStr, suiteAlert := "PASSED", ""
-		if !suiteResult.Passed {
-			suiteResultStr, suiteAlert = "FAILED", "!"
-			failedResults = append(failedResults, suiteResult)
-		}
-		fmt.Printf("%8s%3s%6ds\n", suiteResultStr, suiteAlert, int(time.Since(startTime).Seconds()))
-		// Create the result HTML file.
-		suiteResultFilename := filepath.Join(resultPath,
-			fmt.Sprintf("%s.%s.html", suite.Name, strings.ToLower(suiteResultStr)))
-		suiteResultFile, err := os.Create(suiteResultFilename)
-		if err != nil {
-			errorf("Failed to create result file %s: %s", suiteResultFilename, err)
-		}
-		if err = resultTemplate.Render(suiteResultFile, suiteResult); err != nil {
-			errorf("Failed to render result template: %s", err)
-		}
+		}(s)
 	}
-
+	wg.Wait()
 	return &failedResults, overallSuccess
 }
