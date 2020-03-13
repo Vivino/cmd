@@ -73,7 +73,7 @@ func (cmd AppCmd) Start() error {
 	case <-cmd.waitChan():
 		return errors.New("revel/harness: app died")
 
-	case <-time.After(30 * time.Second):
+	case <-time.After(90 * time.Second):
 		cmd.Kill()
 		return errors.New("revel/harness: app timed out")
 
