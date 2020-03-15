@@ -261,10 +261,8 @@ func runTestSuites(baseURL, resultPath string, testSuites *[]controllers.TestSui
 		errorf("Failed to load suite result template: %s", err)
 	}
 
-	var (
-		overallSuccess = true
-		failedResults  []controllers.TestSuiteResult
-	)
+	failedResults := make(chan controllers.TestSuiteResult, len(*testSuites))
+
 	var wg sync.WaitGroup
 	// TODO make this configurable and default to 1
 	parallelism := make(chan struct{}, 50)
@@ -299,18 +297,15 @@ func runTestSuites(baseURL, resultPath string, testSuites *[]controllers.TestSui
 				}
 				suiteResult.Results = append(suiteResult.Results, testResult)
 			}
-			overallSuccess = overallSuccess && suiteResult.Passed
 
-			// Print result.  (Just PASSED or FAILED, and the time taken)
 			suiteResultStr, suiteAlert := "PASSED", ""
 			if !suiteResult.Passed {
 				suiteResultStr, suiteAlert = "FAILED", "!"
-				failedResults = append(failedResults, suiteResult)
+				failedResults <- suiteResult
 			}
-			fmt.Printf("%8s%3s%6ds\n", suiteResultStr, suiteAlert, int(time.Since(startTime).Seconds()))
+
 			// Create the result HTML file.
-			suiteResultFilename := filepath.Join(resultPath,
-				fmt.Sprintf("%s.%s.html", suite.Name, strings.ToLower(suiteResultStr)))
+			suiteResultFilename := filepath.Join(resultPath, fmt.Sprintf("%s.%s.html", suite.Name, strings.ToLower(suiteResultStr)))
 			suiteResultFile, err := os.Create(suiteResultFilename)
 			if err != nil {
 				errorf("Failed to create result file %s: %s", suiteResultFilename, err)
@@ -318,8 +313,16 @@ func runTestSuites(baseURL, resultPath string, testSuites *[]controllers.TestSui
 			if err = resultTemplate.Render(suiteResultFile, suiteResult); err != nil {
 				errorf("Failed to render result template: %s", err)
 			}
+
+			// Print result.  (Just PASSED or FAILED, and the time taken)
+			fmt.Printf("%8s%3s%6ds\n", suiteResultStr, suiteAlert, int(time.Since(startTime).Seconds()))
 		}(s)
 	}
 	wg.Wait()
-	return &failedResults, overallSuccess
+	close(failedResults)
+	failedResultsSlice := make([]controllers.TestSuiteResult, len(failedResults))
+	for fr := range failedResults {
+		failedResultsSlice = append(failedResultsSlice, fr)
+	}
+	return &failedResultsSlice, len(failedResultsSlice) == 0
 }
