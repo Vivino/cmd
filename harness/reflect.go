@@ -102,8 +102,7 @@ func ProcessSource(roots []string) (*SourceInfo, *revel.Error) {
 			continue
 		}
 
-		// Start walking the directory tree.
-		_ = revel.Walk(root, func(path string, info os.FileInfo, err error) error {
+		stroll := func(path string, info os.FileInfo, err error) error {
 			if err != nil {
 				log.Println("Error scanning app source:", err)
 				return nil
@@ -163,6 +162,15 @@ func ProcessSource(roots []string) (*SourceInfo, *revel.Error) {
 			// There should be only one package in this directory.
 			if len(pkgs) > 1 {
 				log.Println("Most unexpected! Multiple packages in a single directory:", pkgs)
+				// filter out test packages
+				for k := range pkgs {
+					if strings.HasSuffix(k, "_test") {
+						delete(pkgs, k)
+					}
+				}
+				if len(pkgs) > 1 {
+					log.Fatalf("more than one non test package found in dir: %s", path)
+				}
 			}
 
 			var pkg *ast.Package
@@ -172,7 +180,10 @@ func ProcessSource(roots []string) (*SourceInfo, *revel.Error) {
 
 			srcInfo = appendSourceInfo(srcInfo, processPackage(fset, pkgImportPath, path, pkg))
 			return nil
-		})
+		}
+
+		// Start walking the directory tree.
+		_ = revel.Walk(root, stroll)
 	}
 
 	return srcInfo, compileError
