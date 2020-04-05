@@ -162,7 +162,7 @@ func ProcessSource(roots []string) (*SourceInfo, *revel.Error) {
 
 			// There should be only one package in this directory.
 			if len(pkgs) > 1 {
-				log.Println("Most unexpected! Multiple packages in a single directory:", pkgs)
+				log.Println("Most unexpected! Multiple packages in a single directory, removing *_test packages:", pkgs)
 				// filter out test packages
 				for k := range pkgs {
 					if strings.HasSuffix(k, "_test") {

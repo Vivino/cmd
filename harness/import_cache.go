@@ -96,6 +96,7 @@ func (ip ImportCache) addImports(imports map[string]string, decl ast.Decl, srcDi
 		if pkgAlias == "" {
 			pkgAlias = ip[fullPath]
 		}
+
 		// If the package was not aliased (common case), we have to import it
 		// to see what the package name is.
 		// TODO: Can improve performance here a lot:
