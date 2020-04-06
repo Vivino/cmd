@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/revel/cmd/harness"
@@ -226,8 +227,11 @@ func getTestsList(baseURL string) (*[]controllers.TestSuiteDesc, error) {
 				break
 			}
 		}
-		if i < 3 {
-			time.Sleep(3 * time.Second)
+		if resp.Body != nil {
+			resp.Body.Close()
+		}
+		if i < 20 {
+			time.Sleep(time.Millisecond * 500)
 			continue
 		}
 		if err != nil {
@@ -246,6 +250,84 @@ func getTestsList(baseURL string) (*[]controllers.TestSuiteDesc, error) {
 }
 
 func runTestSuites(baseURL, resultPath string, testSuites *[]controllers.TestSuiteDesc) (*[]controllers.TestSuiteResult, bool) {
+	// Load the result template, which we execute for each suite.
+	module, _ := revel.ModuleByName("testrunner")
+	TemplateLoader := revel.NewTemplateLoader([]string{filepath.Join(module.Path, "app", "views")})
+	if err := TemplateLoader.Refresh(); err != nil {
+		errorf("Failed to compile templates: %s", err)
+	}
+	resultTemplate, err := TemplateLoader.Template("TestRunner/SuiteResult.html")
+	if err != nil {
+		errorf("Failed to load suite result template: %s", err)
+	}
+
+	failedResults := make(chan controllers.TestSuiteResult, len(*testSuites))
+
+	var wg sync.WaitGroup
+	// TODO make this configurable and default to 1
+	parallelism := make(chan struct{}, 50)
+	for _, s := range *testSuites {
+		wg.Add(1)
+		parallelism <- struct{}{}
+		go func(suite controllers.TestSuiteDesc) {
+			defer wg.Done()
+			defer func() { <-parallelism }()
+			// Print the name of the suite we're running.
+			name := suite.Name
+			if len(name) > 22 {
+				name = name[:19] + "..."
+			}
+			fmt.Printf("%-22s", name)
+
+			// Run every test.
+			startTime := time.Now()
+			suiteResult := controllers.TestSuiteResult{Name: suite.Name, Passed: true}
+			for _, test := range suite.Tests {
+				testURL := baseURL + "/@tests/" + suite.Name + "/" + test.Name
+				resp, err := http.Get(testURL)
+				if err != nil {
+					errorf("Failed to fetch test result at url %s: %s", testURL, err)
+				}
+
+				var testResult controllers.TestResult
+				err = json.NewDecoder(resp.Body).Decode(&testResult)
+				resp.Body.Close()
+				if err == nil && !testResult.Passed {
+					suiteResult.Passed = false
+				}
+				suiteResult.Results = append(suiteResult.Results, testResult)
+			}
+
+			suiteResultStr, suiteAlert := "PASSED", ""
+			if !suiteResult.Passed {
+				suiteResultStr, suiteAlert = "FAILED", "!"
+				failedResults <- suiteResult
+			}
+
+			// Create the result HTML file.
+			suiteResultFilename := filepath.Join(resultPath, fmt.Sprintf("%s.%s.html", suite.Name, strings.ToLower(suiteResultStr)))
+			suiteResultFile, err := os.Create(suiteResultFilename)
+			if err != nil {
+				errorf("Failed to create result file %s: %s", suiteResultFilename, err)
+			}
+			if err = resultTemplate.Render(suiteResultFile, suiteResult); err != nil {
+				errorf("Failed to render result template: %s", err)
+			}
+
+			// Print result.  (Just PASSED or FAILED, and the time taken)
+			fmt.Printf("%8s%3s%6ds\n", suiteResultStr, suiteAlert, int(time.Since(startTime).Seconds()))
+		}(s)
+	}
+	wg.Wait()
+	close(failedResults)
+	failedResultsSlice := make([]controllers.TestSuiteResult, len(failedResults))
+	for fr := range failedResults {
+		failedResultsSlice = append(failedResultsSlice, fr)
+	}
+	return &failedResultsSlice, len(failedResultsSlice) == 0
+}
+
+func runTestSuitesSerial(baseURL, resultPath string, testSuites *[]controllers.TestSuiteDesc) (*[]controllers.TestSuiteResult, bool) {
 	// Load the result template, which we execute for each suite.
 	module, _ := revel.ModuleByName("testrunner")
 	TemplateLoader := revel.NewTemplateLoader([]string{filepath.Join(module.Path, "app", "views")})

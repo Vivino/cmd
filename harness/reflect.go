@@ -94,6 +94,7 @@ func ProcessSource(roots []string) (*SourceInfo, *revel.Error) {
 		srcInfo      *SourceInfo
 		compileError *revel.Error
 	)
+	ip := ImportCache{}
 
 	for _, root := range roots {
 		rootImportPath := importPathFromPath(root)
@@ -102,8 +103,7 @@ func ProcessSource(roots []string) (*SourceInfo, *revel.Error) {
 			continue
 		}
 
-		// Start walking the directory tree.
-		_ = revel.Walk(root, func(path string, info os.FileInfo, err error) error {
+		stroll := func(path string, info os.FileInfo, err error) error {
 			if err != nil {
 				log.Println("Error scanning app source:", err)
 				return nil
@@ -162,7 +162,16 @@ func ProcessSource(roots []string) (*SourceInfo, *revel.Error) {
 
 			// There should be only one package in this directory.
 			if len(pkgs) > 1 {
-				log.Println("Most unexpected! Multiple packages in a single directory:", pkgs)
+				log.Println("Most unexpected! Multiple packages in a single directory, removing *_test packages:", pkgs)
+				// filter out test packages
+				for k := range pkgs {
+					if strings.HasSuffix(k, "_test") {
+						delete(pkgs, k)
+					}
+				}
+				if len(pkgs) > 1 {
+					log.Fatalf("more than one non test package found in dir: %s", path)
+				}
 			}
 
 			var pkg *ast.Package
@@ -170,9 +179,12 @@ func ProcessSource(roots []string) (*SourceInfo, *revel.Error) {
 				pkg = v
 			}
 
-			srcInfo = appendSourceInfo(srcInfo, processPackage(fset, pkgImportPath, path, pkg))
+			srcInfo = appendSourceInfo(srcInfo, ip.processPackage(fset, pkgImportPath, path, pkg))
 			return nil
-		})
+		}
+
+		// Start walking the directory tree.
+		_ = revel.Walk(root, stroll)
 	}
 
 	return srcInfo, compileError
@@ -195,66 +207,6 @@ func appendSourceInfo(srcInfo1, srcInfo2 *SourceInfo) *SourceInfo {
 	return srcInfo1
 }
 
-func processPackage(fset *token.FileSet, pkgImportPath, pkgPath string, pkg *ast.Package) *SourceInfo {
-	var (
-		structSpecs     []*TypeInfo
-		initImportPaths []string
-
-		methodSpecs     = make(methodMap)
-		validationKeys  = make(map[string]map[int]string)
-		scanControllers = strings.HasSuffix(pkgImportPath, "/controllers") ||
-			strings.Contains(pkgImportPath, "/controllers/")
-		scanTests = strings.HasSuffix(pkgImportPath, "/tests") ||
-			strings.Contains(pkgImportPath, "/tests/")
-	)
-
-	// For each source file in the package...
-	for _, file := range pkg.Files {
-
-		// Imports maps the package key to the full import path.
-		// e.g. import "sample/app/models" => "models": "sample/app/models"
-		imports := map[string]string{}
-
-		// For each declaration in the source file...
-		for _, decl := range file.Decls {
-			addImports(imports, decl, pkgPath)
-
-			if scanControllers {
-				// Match and add both structs and methods
-				structSpecs = appendStruct(structSpecs, pkgImportPath, pkg, decl, imports, fset)
-				appendAction(fset, methodSpecs, decl, pkgImportPath, pkg.Name, imports)
-			} else if scanTests {
-				structSpecs = appendStruct(structSpecs, pkgImportPath, pkg, decl, imports, fset)
-			}
-
-			// If this is a func...
-			if funcDecl, ok := decl.(*ast.FuncDecl); ok {
-				// Scan it for validation calls
-				lineKeys := getValidationKeys(fset, funcDecl, imports)
-				if len(lineKeys) > 0 {
-					validationKeys[pkgImportPath+"."+getFuncName(funcDecl)] = lineKeys
-				}
-
-				// Check if it's an init function.
-				if funcDecl.Name.Name == "init" {
-					initImportPaths = []string{pkgImportPath}
-				}
-			}
-		}
-	}
-
-	// Add the method specs to the struct specs.
-	for _, spec := range structSpecs {
-		spec.MethodSpecs = methodSpecs[spec.StructName]
-	}
-
-	return &SourceInfo{
-		StructSpecs:     structSpecs,
-		ValidationKeys:  validationKeys,
-		InitImportPaths: initImportPaths,
-	}
-}
-
 // getFuncName returns a name for this func or method declaration.
 // e.g. "(*Application).SayHello" for a method, "SayHello" for a func.
 func getFuncName(funcDecl *ast.FuncDecl) string {
@@ -269,51 +221,6 @@ func getFuncName(funcDecl *ast.FuncDecl) string {
 		prefix += "."
 	}
 	return prefix + funcDecl.Name.Name
-}
-
-func addImports(imports map[string]string, decl ast.Decl, srcDir string) {
-	genDecl, ok := decl.(*ast.GenDecl)
-	if !ok {
-		return
-	}
-
-	if genDecl.Tok != token.IMPORT {
-		return
-	}
-
-	for _, spec := range genDecl.Specs {
-		importSpec := spec.(*ast.ImportSpec)
-		var pkgAlias string
-		if importSpec.Name != nil {
-			pkgAlias = importSpec.Name.Name
-			if pkgAlias == "_" {
-				continue
-			}
-		}
-		quotedPath := importSpec.Path.Value           // e.g. "\"sample/app/models\""
-		fullPath := quotedPath[1 : len(quotedPath)-1] // Remove the quotes
-
-		// If the package was not aliased (common case), we have to import it
-		// to see what the package name is.
-		// TODO: Can improve performance here a lot:
-		// 1. Do not import everything over and over again.  Keep a cache.
-		// 2. Exempt the standard library; their directories always match the package name.
-		// 3. Can use build.FindOnly and then use parser.ParseDir with mode PackageClauseOnly
-		if pkgAlias == "" {
-			pkg, err := build.Import(fullPath, srcDir, 0)
-			if err != nil {
-				// We expect this to happen for apps using reverse routing (since we
-				// have not yet generated the routes).  Don't log that.
-				if !strings.HasSuffix(fullPath, "/app/routes") {
-					revel.TRACE.Println("Could not find import:", fullPath)
-				}
-				continue
-			}
-			pkgAlias = pkg.Name
-		}
-
-		imports[pkgAlias] = fullPath
-	}
 }
 
 // If this Decl is a struct type definition, it is summarized and added to specs.
